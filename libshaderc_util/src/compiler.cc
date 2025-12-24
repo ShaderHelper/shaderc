@@ -344,6 +344,7 @@ std::tuple<bool, std::vector<uint32_t>, size_t> Compiler::Compile(
   options.generateDebugInfo = generate_debug_info_;
   options.disableOptimizer = true;
   options.optimizeSize = false;
+  options.emitNonSemanticShaderDebugSource = emit_nonsemantic_shader_debug_source_;
   // Note the call to GlslangToSpv also populates compilation_output_data.
   glslang::GlslangToSpv(*program.getIntermediate(used_shader_stage), spirv,
                         &options);

@@ -426,6 +426,11 @@ void shaderc_compile_options_set_generate_debug_info(
   options->compiler.SetGenerateDebugInfo();
 }
 
+void shaderc_compile_options_set_nonsemantic_shader_debug_source(
+    shaderc_compile_options_t options) {
+  options->compiler.SetNonSemanticShaderDebugSource();
+}
+
 void shaderc_compile_options_set_optimization_level(
     shaderc_compile_options_t options, shaderc_optimization_level level) {
   auto opt_level = shaderc_util::Compiler::OptimizationLevel::Zero;
