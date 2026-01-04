@@ -51,6 +51,7 @@ if(SHADERC_ENABLE_INSTALL)
       include/shaderc/visibility.h
       include/shaderc/shaderc.h
       include/shaderc/shaderc.hpp
+      include/shaderc/glslang_shader.hpp
     DESTINATION
       ${CMAKE_INSTALL_INCLUDEDIR}/shaderc)
 
@@ -96,6 +97,12 @@ shaderc_add_tests(
 
 shaderc_combine_static_lib(shaderc_combined shaderc)
 
+# If glslang is built as shared libs, shaderc_combined cannot physically pack it.
+# Propagate the dependency so downstream links succeed.
+if (SHADERC_GLSLANG_SHARED)
+  target_link_libraries(shaderc_combined PUBLIC glslang SPIRV)
+endif()
+
 if(SHADERC_ENABLE_INSTALL)
   install(TARGETS shaderc_combined DESTINATION ${CMAKE_INSTALL_LIBDIR})
 endif(SHADERC_ENABLE_INSTALL)
@@ -113,6 +120,7 @@ shaderc_add_tests(
 if(${SHADERC_ENABLE_TESTS})
   add_executable(shaderc_c_smoke_test ./src/shaderc_c_smoke_test.c)
   shaderc_default_c_compile_options(shaderc_c_smoke_test)
+  shaderc_copy_glslang_dlls(shaderc_c_smoke_test)
   target_include_directories(shaderc_c_smoke_test PUBLIC ${shaderc_SOURCE_DIR}/libshaderc_util/include)
   target_link_libraries(shaderc_c_smoke_test PRIVATE shaderc)
   add_test(NAME shaderc_c_smoke_test COMMAND shaderc_c_smoke_test)

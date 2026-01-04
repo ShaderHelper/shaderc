@@ -26,6 +26,10 @@ message(STATUS "Shaderc: build type is \"${CMAKE_BUILD_TYPE}\".")
 
 option(SHADERC_ENABLE_WGSL_OUTPUT "Enable WGSL output" OFF)
 
+option(SHADERC_GLSLANG_SHARED
+       "Build glslang (and its SPIRV library) as shared libraries when built via shaderc/third_party"
+       ON)
+
 option(SHADERC_SKIP_INSTALL "Skip installation" ${SHADERC_SKIP_INSTALL})
 if(NOT ${SHADERC_SKIP_INSTALL})
   set(SHADERC_ENABLE_INSTALL ON)
@@ -119,11 +123,13 @@ add_custom_target(add-copyright
 if(MSVC)
   option(SHADERC_ENABLE_SHARED_CRT
           "Use the shared CRT instead of the static CRT"
-		  OFF)
+		  ON)
   if (SHADERC_ENABLE_SHARED_CRT)
-    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
+    # Use a single runtime across all configurations (no /MDd in Debug).
+    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreadedDLL")
   else()
-    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+    # Use a single runtime across all configurations (no /MTd in Debug).
+    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded")
   endif()
 endif(MSVC)
 

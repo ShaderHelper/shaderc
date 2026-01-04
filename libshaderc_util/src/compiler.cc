@@ -262,75 +262,18 @@ std::tuple<bool, std::vector<uint32_t>, size_t> Compiler::Compile(
     }
   }
 
-  // Parsing requires its own Glslang symbol tables.
-  glslang::TShader shader(used_shader_stage);
-  const char* shader_strings = input_source_string.data();
-  const int shader_lengths = static_cast<int>(input_source_string.size());
-  const char* string_names = error_tag.c_str();
-  shader.setStringsWithLengthsAndNames(&shader_strings, &shader_lengths,
-                                       &string_names, 1);
-  shader.setPreamble(preamble.c_str());
-  shader.setEntryPoint(entry_point_name);
-  shader.setAutoMapBindings(auto_bind_uniforms_);
-  if (auto_combined_image_sampler_) {
-    shader.setTextureSamplerTransformMode(
-        EShTexSampTransUpgradeTextureRemoveSampler);
-  }
-  shader.setAutoMapLocations(auto_map_locations_);
-  const auto& bases = auto_binding_base_[static_cast<int>(used_shader_stage)];
-  shader.setShiftImageBinding(bases[static_cast<int>(UniformKind::Image)]);
-  shader.setShiftSamplerBinding(bases[static_cast<int>(UniformKind::Sampler)]);
-  shader.setShiftTextureBinding(bases[static_cast<int>(UniformKind::Texture)]);
-  shader.setShiftUboBinding(bases[static_cast<int>(UniformKind::Buffer)]);
-  shader.setShiftSsboBinding(
-      bases[static_cast<int>(UniformKind::StorageBuffer)]);
-  shader.setShiftUavBinding(
-      bases[static_cast<int>(UniformKind::UnorderedAccessView)]);
-  shader.setHlslIoMapping(hlsl_iomap_);
-  shader.setResourceSetBinding(
-      hlsl_explicit_bindings_[static_cast<int>(used_shader_stage)]);
-  shader.setEnvClient(target_client_info.client,
-                      target_client_info.client_version);
-  shader.setEnvTarget(target_client_info.target_language,
-                      target_client_info.target_language_version);
-  if (hlsl_functionality1_enabled_) {
-    shader.setEnvTargetHlslFunctionality1();
-  }
-  if (vulkan_rules_relaxed_) {
-    glslang::EShSource language = glslang::EShSourceNone;
-    switch (source_language_) {
-      case SourceLanguage::GLSL:
-        language = glslang::EShSourceGlsl;
-        break;
-      case SourceLanguage::HLSL:
-        language = glslang::EShSourceHlsl;
-        break;
-    }
-    // This option will only be used if the Vulkan client is used.
-    // If new versions of GL_KHR_vulkan_glsl come out, it would make sense to
-    // let callers specify which version to use. For now, just use 100.
-    shader.setEnvInput(language, used_shader_stage, glslang::EShClientVulkan,
-                       100);
-    shader.setEnvInputVulkanRulesRelaxed();
-  }
-  shader.setInvertY(invert_y_enabled_);
-  shader.setNanMinMaxClamp(nan_clamp_);
-
-  const EShMessages rules =
-      GetMessageRules(target_env_, source_language_, hlsl_offsets_,
-                      hlsl_16bit_types_enabled_, generate_debug_info_);
-
-  bool success = shader.parse(&limits_, default_version_, default_profile_,
-                              force_version_profile_, kNotForwardCompatible,
-                              rules, includer);
-
-  success &= PrintFilteredErrors(error_tag, error_stream, warnings_as_errors_,
-                                 suppress_warnings_, shader.getInfoLog(),
-                                 total_warnings, total_errors);
+  // From here on, compilation requires parsing. Reuse Compiler::Parse() so
+  // configuration + stage deduction + parse diagnostics are shared.
+  bool success = false;
+  std::unique_ptr<glslang::TShader> shader_ptr;
+  std::tie(success, shader_ptr) =
+      Parse(input_source_string, used_shader_stage, error_tag, entry_point_name,
+            stage_callback, includer, error_stream, total_warnings, total_errors);
   if (!success) return result_tuple;
+  const EShLanguage parsed_stage = shader_ptr->getStage();
 
   glslang::TProgram program;
-  program.addShader(&shader);
+  program.addShader(shader_ptr.get());
   success = program.link(EShMsgDefault) && program.mapIO();
   success &= PrintFilteredErrors(error_tag, error_stream, warnings_as_errors_,
                                  suppress_warnings_, program.getInfoLog(),
@@ -346,7 +289,7 @@ std::tuple<bool, std::vector<uint32_t>, size_t> Compiler::Compile(
   options.optimizeSize = false;
   options.emitNonSemanticShaderDebugSource = emit_nonsemantic_shader_debug_source_;
   // Note the call to GlslangToSpv also populates compilation_output_data.
-  glslang::GlslangToSpv(*program.getIntermediate(used_shader_stage), spirv,
+  glslang::GlslangToSpv(*program.getIntermediate(parsed_stage), spirv,
                         &options);
 
   // Set the tool field (the top 16-bits) in the generator word to
@@ -402,6 +345,142 @@ std::tuple<bool, std::vector<uint32_t>, size_t> Compiler::Compile(
     compilation_output_data_size_in_bytes = spirv.size() * sizeof(spirv[0]);
     return result_tuple;
   }
+}
+
+std::tuple<bool, std::unique_ptr<glslang::TShader>> Compiler::Parse(
+    const string_piece& input_source_string, EShLanguage forced_shader_stage,
+    const std::string& error_tag, const char* entry_point_name,
+    const std::function<EShLanguage(std::ostream* error_stream,
+                                    const string_piece& error_tag)>&
+        stage_callback,
+    CountingIncluder& includer, std::ostream* error_stream,
+    size_t* total_warnings, size_t* total_errors) const {
+  // Default to failed parse.
+  auto result_tuple =
+      std::make_tuple(false, std::unique_ptr<glslang::TShader>());
+  bool& succeeded = std::get<0>(result_tuple);
+  std::unique_ptr<glslang::TShader>& shader = std::get<1>(result_tuple);
+
+  // Check target environment.
+  const auto target_client_info = GetGlslangClientInfo(
+      error_tag, target_env_, target_env_version_, target_spirv_version_,
+      target_spirv_version_is_forced_);
+  if (!target_client_info.error.empty()) {
+    *error_stream << target_client_info.error;
+    *total_warnings = 0;
+    *total_errors = 1;
+    return result_tuple;
+  }
+
+  EShLanguage used_shader_stage = forced_shader_stage;
+  const std::string macro_definitions =
+      shaderc_util::format(predefined_macros_, "#define ", " ", "\n");
+  const std::string pound_extension =
+      "#extension GL_GOOGLE_include_directive : enable\n";
+  const std::string preamble = macro_definitions + pound_extension;
+
+  if (used_shader_stage == EShLangCount) {
+    bool success;
+    std::string preprocessed_shader;
+    std::string glslang_errors;
+    std::tie(success, preprocessed_shader, glslang_errors) =
+        PreprocessShader(error_tag, input_source_string, preamble, includer);
+
+    success &= PrintFilteredErrors(error_tag, error_stream, warnings_as_errors_,
+                                   /* suppress_warnings = */ true,
+                                   glslang_errors.c_str(), total_warnings,
+                                   total_errors);
+    if (!success) return result_tuple;
+
+    int version;
+    EProfile profile;
+    std::tie(version, profile) = DeduceVersionProfile(preprocessed_shader);
+    const bool is_for_next_line = LineDirectiveIsForNextLine(version, profile);
+
+    preprocessed_shader =
+        CleanupPreamble(preprocessed_shader, error_tag, pound_extension,
+                        includer.num_include_directives(), is_for_next_line);
+
+    std::string errors;
+    std::tie(used_shader_stage, errors) =
+        GetShaderStageFromSourceCode(error_tag, preprocessed_shader);
+    if (!errors.empty()) {
+      *error_stream << errors;
+      return result_tuple;
+    }
+    if (used_shader_stage == EShLangCount) {
+      if ((used_shader_stage = stage_callback(error_stream, error_tag)) ==
+          EShLangCount) {
+        return result_tuple;
+      }
+    }
+  }
+
+  shader.reset(new glslang::TShader(used_shader_stage));
+  const auto& bases = auto_binding_base_[static_cast<int>(used_shader_stage)];
+  {
+    const char* shader_strings = input_source_string.data();
+    const int shader_lengths = static_cast<int>(input_source_string.size());
+    const char* string_names = error_tag.c_str();
+    shader->setStringsWithLengthsAndNames(&shader_strings, &shader_lengths,
+                                          &string_names, 1);
+    shader->setPreamble(preamble.c_str());
+    shader->setEntryPoint(entry_point_name);
+    shader->setAutoMapBindings(auto_bind_uniforms_);
+    if (auto_combined_image_sampler_) {
+      shader->setTextureSamplerTransformMode(
+          EShTexSampTransUpgradeTextureRemoveSampler);
+    }
+    shader->setDebugInfo(generate_debug_info_);
+    shader->setAutoMapLocations(auto_map_locations_);
+    shader->setShiftImageBinding(bases[static_cast<int>(UniformKind::Image)]);
+    shader->setShiftSamplerBinding(bases[static_cast<int>(UniformKind::Sampler)]);
+    shader->setShiftTextureBinding(bases[static_cast<int>(UniformKind::Texture)]);
+    shader->setShiftUboBinding(bases[static_cast<int>(UniformKind::Buffer)]);
+    shader->setShiftSsboBinding(
+        bases[static_cast<int>(UniformKind::StorageBuffer)]);
+    shader->setShiftUavBinding(
+        bases[static_cast<int>(UniformKind::UnorderedAccessView)]);
+    shader->setHlslIoMapping(hlsl_iomap_);
+    shader->setResourceSetBinding(
+        hlsl_explicit_bindings_[static_cast<int>(used_shader_stage)]);
+    shader->setEnvClient(target_client_info.client,
+                         target_client_info.client_version);
+    shader->setEnvTarget(target_client_info.target_language,
+                         target_client_info.target_language_version);
+    if (hlsl_functionality1_enabled_) {
+      shader->setEnvTargetHlslFunctionality1();
+    }
+    if (vulkan_rules_relaxed_) {
+      glslang::EShSource language = glslang::EShSourceNone;
+      switch (source_language_) {
+        case SourceLanguage::GLSL:
+          language = glslang::EShSourceGlsl;
+          break;
+        case SourceLanguage::HLSL:
+          language = glslang::EShSourceHlsl;
+          break;
+      }
+      shader->setEnvInput(language, used_shader_stage, glslang::EShClientVulkan,
+                          100);
+      shader->setEnvInputVulkanRulesRelaxed();
+    }
+    shader->setInvertY(invert_y_enabled_);
+    shader->setNanMinMaxClamp(nan_clamp_);
+  }
+
+  const EShMessages rules =
+      GetMessageRules(target_env_, source_language_, hlsl_offsets_,
+                      hlsl_16bit_types_enabled_, generate_debug_info_);
+
+  succeeded = shader->parse(&limits_, default_version_, default_profile_,
+                               force_version_profile_, kNotForwardCompatible,
+                               rules, includer);
+
+  succeeded &= PrintFilteredErrors(error_tag, error_stream, warnings_as_errors_,
+                                 suppress_warnings_, shader->getInfoLog(),
+                                 total_warnings, total_errors);
+  return result_tuple;
 }
 
 void Compiler::AddMacroDefinition(const char* macro, size_t macro_length,

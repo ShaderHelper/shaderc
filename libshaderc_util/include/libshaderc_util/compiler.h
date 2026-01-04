@@ -403,6 +403,20 @@ class Compiler {
       std::ostream* error_stream, size_t* total_warnings,
       size_t* total_errors) const;
 
+  // Parses the shader source and returns the parsed glslang::TShader on
+  // success. The TShader is configured the same way as in Compile().
+  //
+  // This stops after a successful glslang parse (it does not link, map IO, or
+  // generate SPIR-V).
+  std::tuple<bool, std::unique_ptr<glslang::TShader>> Parse(
+      const string_piece& input_source_string, EShLanguage forced_shader_stage,
+      const std::string& error_tag, const char* entry_point_name,
+      const std::function<EShLanguage(std::ostream* error_stream,
+                                      const string_piece& error_tag)>&
+          stage_callback,
+      CountingIncluder& includer, std::ostream* error_stream,
+      size_t* total_warnings, size_t* total_errors) const;
+
   static EShMessages GetDefaultRules() {
     return static_cast<EShMessages>(EShMsgSpvRules | EShMsgVulkanRules |
                                     EShMsgCascadingErrors);

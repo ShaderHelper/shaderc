@@ -70,6 +70,23 @@ function(shaderc_default_compile_options TARGET)
   endif()
 endfunction(shaderc_default_compile_options)
 
+function(shaderc_copy_glslang_dlls TARGET)
+  if (WIN32 AND SHADERC_GLSLANG_SHARED)
+    foreach(_dep IN ITEMS glslang SPIRV)
+      if (TARGET ${_dep})
+        get_target_property(_dep_type ${_dep} TYPE)
+        if ("${_dep_type}" STREQUAL "SHARED_LIBRARY")
+          add_custom_command(TARGET ${TARGET} POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+              $<TARGET_FILE:${_dep}> $<TARGET_FILE_DIR:${TARGET}>)
+        endif()
+      endif()
+    endforeach()
+    unset(_dep)
+    unset(_dep_type)
+  endif()
+endfunction(shaderc_copy_glslang_dlls)
+
 # Build an asciidoc file; additional arguments past the base filename specify
 # additional dependencies for the file.
 function(shaderc_add_asciidoc TARGET FILE)
@@ -112,6 +129,7 @@ function(shaderc_add_tests)
       set(TEST_NAME ${PARSED_ARGS_TEST_PREFIX}_${TARGET}_test)
       add_executable(${TEST_NAME} src/${TARGET}_test.cc)
       shaderc_default_compile_options(${TEST_NAME})
+      shaderc_copy_glslang_dlls(${TEST_NAME})
       if (MINGW)
         target_compile_options(${TEST_NAME} PRIVATE -DSHADERC_DISABLE_THREADED_TESTS)
       endif()

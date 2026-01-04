@@ -682,6 +682,82 @@ shaderc_compilation_result_t CompileToSpecifiedOutputType(
 }
 }  // anonymous namespace
 
+namespace {
+shaderc_parsed_shader_t ParseToGlslangShader(
+    const shaderc_compiler_t compiler, const char* source_text,
+    size_t source_text_size, shaderc_shader_kind shader_kind,
+    const char* input_file_name, const char* entry_point_name,
+    const shaderc_compile_options_t additional_options) {
+  auto* result = new (std::nothrow) shaderc_parsed_shader;
+  if (!result) return nullptr;
+
+  if (!input_file_name) {
+    result->messages = "Input file name string was null.";
+    result->num_errors = 1;
+    result->compilation_status = shaderc_compilation_status_compilation_error;
+    return result;
+  }
+
+  if (!compiler || !compiler->initializer) {
+    result->messages = "Compiler object was not initialized.";
+    result->num_errors = 1;
+    result->compilation_status = shaderc_compilation_status_internal_error;
+    return result;
+  }
+
+  // Ensure glslang stays initialized even if the caller destroys the compiler.
+  result->initializer.reset(new shaderc_util::GlslangInitializer);
+
+  result->compilation_status = shaderc_compilation_status_invalid_stage;
+  bool parse_succeeded = false;  // In case we exit early.
+
+  TRY_IF_EXCEPTIONS_ENABLED {
+    std::stringstream errors;
+    size_t total_warnings = 0;
+    size_t total_errors = 0;
+    std::string input_file_name_str(input_file_name);
+    EShLanguage forced_stage = GetForcedStage(shader_kind);
+    shaderc_util::string_piece source_string =
+        shaderc_util::string_piece(source_text, source_text + source_text_size);
+    StageDeducer stage_deducer(shader_kind);
+
+    if (additional_options) {
+      InternalFileIncluder includer(additional_options->include_resolver,
+                                    additional_options->include_result_releaser,
+                                    additional_options->include_user_data);
+      std::tie(parse_succeeded, result->shader) =
+          additional_options->compiler.Parse(
+              source_string, forced_stage, input_file_name_str,
+              entry_point_name, std::ref(stage_deducer), includer, &errors,
+              &total_warnings, &total_errors);
+    } else {
+      InternalFileIncluder includer;
+      std::tie(parse_succeeded, result->shader) =
+          shaderc_util::Compiler().Parse(source_string, forced_stage,
+                                         input_file_name_str, entry_point_name,
+                                         std::ref(stage_deducer), includer,
+                                         &errors, &total_warnings, &total_errors);
+    }
+
+    result->messages = errors.str();
+    result->num_warnings = total_warnings;
+    result->num_errors = total_errors;
+    if (parse_succeeded) {
+      result->compilation_status = shaderc_compilation_status_success;
+    } else {
+      result->compilation_status =
+          stage_deducer.error() ? shaderc_compilation_status_invalid_stage
+                                : shaderc_compilation_status_compilation_error;
+    }
+  }
+  CATCH_IF_EXCEPTIONS_ENABLED(...) {
+    result->compilation_status = shaderc_compilation_status_internal_error;
+  }
+
+  return result;
+}
+}  // anonymous namespace
+
 shaderc_compilation_result_t shaderc_compile_into_spv(
     const shaderc_compiler_t compiler, const char* source_text,
     size_t source_text_size, shaderc_shader_kind shader_kind,
@@ -713,6 +789,16 @@ shaderc_compilation_result_t shaderc_compile_into_preprocessed_text(
       compiler, source_text, source_text_size, shader_kind, input_file_name,
       entry_point_name, additional_options,
       shaderc_util::Compiler::OutputType::PreprocessedText);
+}
+
+shaderc_parsed_shader_t shaderc_parse_into_glslang_shader(
+    const shaderc_compiler_t compiler, const char* source_text,
+    size_t source_text_size, shaderc_shader_kind shader_kind,
+    const char* input_file_name, const char* entry_point_name,
+    const shaderc_compile_options_t additional_options) {
+  return ParseToGlslangShader(compiler, source_text, source_text_size,
+                              shader_kind, input_file_name, entry_point_name,
+                              additional_options);
 }
 
 shaderc_compilation_result_t shaderc_assemble_into_spv(
@@ -778,14 +864,44 @@ void shaderc_result_release(shaderc_compilation_result_t result) {
   delete result;
 }
 
+void shaderc_parsed_shader_release(shaderc_parsed_shader_t parsed) {
+  delete parsed;
+}
+
 const char* shaderc_result_get_error_message(
     const shaderc_compilation_result_t result) {
   return result->messages.c_str();
 }
 
+shaderc_compilation_status shaderc_parsed_shader_get_compilation_status(
+    const shaderc_parsed_shader_t parsed) {
+  return parsed->compilation_status;
+}
+
+const char* shaderc_parsed_shader_get_error_message(
+    const shaderc_parsed_shader_t parsed) {
+  return parsed->messages.c_str();
+}
+
+size_t shaderc_parsed_shader_get_num_warnings(
+    const shaderc_parsed_shader_t parsed) {
+  return parsed->num_warnings;
+}
+
+size_t shaderc_parsed_shader_get_num_errors(
+    const shaderc_parsed_shader_t parsed) {
+  return parsed->num_errors;
+}
+
 shaderc_compilation_status shaderc_result_get_compilation_status(
     const shaderc_compilation_result_t result) {
   return result->compilation_status;
+}
+
+void* shaderc_parsed_shader_get_tshader(
+    shaderc_parsed_shader_t parsed) {
+  if (!parsed) return nullptr;
+  return static_cast<void*>(parsed->shader.get());
 }
 
 void shaderc_get_spv_version(unsigned int* version, unsigned int* revision) {

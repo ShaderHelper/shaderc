@@ -45,6 +45,25 @@ struct shaderc_compilation_result {
       shaderc_compilation_status_null_result_object;
 };
 
+// Holds a parsed glslang::TShader, plus diagnostics.
+struct shaderc_parsed_shader {
+  // Keeps glslang process-level state alive for the lifetime of the parsed AST.
+  std::unique_ptr<shaderc_util::GlslangInitializer> initializer;
+
+  // The parsed shader (nullptr on failure).
+  std::unique_ptr<glslang::TShader> shader;
+
+  // Parsing messages.
+  std::string messages;
+  // Number of errors.
+  size_t num_errors = 0;
+  // Number of warnings.
+  size_t num_warnings = 0;
+  // Status.
+  shaderc_compilation_status compilation_status =
+      shaderc_compilation_status_null_result_object;
+};
+
 // Compilation result class using a vector for holding the compilation
 // output data.
 class shaderc_compilation_result_vector : public shaderc_compilation_result {
